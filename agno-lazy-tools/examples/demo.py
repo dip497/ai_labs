@@ -3,20 +3,22 @@
 An agent with a 35-tool catalog (7 real Agno toolkits plus a few of our own) answers a
 question with only `search_tools` attached; the tools it finds are loaded into the same
 run. The same question then goes to an agent with every tool attached, and the tool
-schemas the two sent to the model are compared.
+schemas the two sent to the model are compared. With an OpenAI model, a third agent
+loads its tools through OpenAI's native tool search (`lazy.wrap(model, native=True)`).
 
     uv run python examples/demo.py                                        # offline scripted model
-    uv run --extra openai python examples/demo.py --model openai:gpt-6-luna
+    uv run --extra openai python examples/demo.py --model openai:gpt-6-luna --padding-tokens 2000
     uv run --extra anthropic python examples/demo.py --model anthropic:claude-opus-5
 """
 
 from __future__ import annotations
 
 import argparse
+import functools
 import logging
 import sys
 from pathlib import Path
-from typing import Callable, List, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # run from any directory
 
@@ -140,9 +142,11 @@ def make_model(spec: str) -> Model:
         return ScriptedModel(policy=scripted_policy)
     provider, _, model_id = spec.partition(":")
     if provider == "openai":
-        from agno.models.openai import OpenAIChat
-
-        return OpenAIChat(id=model_id or "gpt-6-luna")
+        # The Responses API has native tool search, and gpt-6-luna calls functions over Chat
+        # Completions only with reasoning_effort="none". Agno 3.0.11 doesn't count gpt-6 models
+        # as reasoning models, so by default it drops their reasoning items between requests;
+        # with store=False and the encrypted reasoning included, it replays them.
+        return openai_model_class()(id=model_id or "gpt-6-luna", store=False, include=["reasoning.encrypted_content"])
     if provider == "anthropic":
         from agno.models.anthropic import Claude
 
@@ -150,7 +154,35 @@ def make_model(spec: str) -> Model:
     raise SystemExit(f"Unknown --model {spec!r}: use offline, openai:<model id> or anthropic:<model id>")
 
 
-def report(run: RunOutput, tools_for_request: Callable[[List[Message]], List[Function]]) -> Tuple[int, int]:
+def padding(tokens: int) -> Optional[str]:
+    """About `tokens` tokens of filler, standing in for a production agent's long system prompt."""
+    if tokens <= 0:
+        return None
+    line = "This line pads the system prompt, as the long instructions of a production agent would; ignore it."
+    return "\n".join([line] * max(1, round(tokens / count_text_tokens(line))))
+
+
+@functools.lru_cache(maxsize=None)
+def openai_model_class() -> type:
+    from agno.models.openai import OpenAIResponses  # needs the openai extra
+
+    class Responses(OpenAIResponses):
+        def _get_metrics(self, response_usage: Any) -> Any:
+            # Agno 3.0.11 records OpenAI's cache reads but not its cache writes (billed at 1.25x on GPT-5.6+).
+            metrics = super()._get_metrics(response_usage)
+            metrics.cache_write_tokens = getattr(response_usage.input_tokens_details, "cache_write_tokens", None) or 0
+            return metrics
+
+    return Responses
+
+
+def input_cost(metrics: Any) -> float:
+    """Input cost in uncached-token units at GPT-5.6+ cache rates: reads 0.1x, writes 1.25x."""
+    uncached = metrics.input_tokens - metrics.cache_read_tokens - metrics.cache_write_tokens
+    return uncached + 0.1 * metrics.cache_read_tokens + 1.25 * metrics.cache_write_tokens
+
+
+def report(run: RunOutput, tools_for_request: Callable[[List[Message]], List[Function]], live: bool) -> Tuple[int, int]:
     """Print each model request of `run`; returns (number of requests, total tool-schema tokens).
 
     Each assistant message is one model request; `tools_for_request` gets the messages
@@ -165,7 +197,11 @@ def report(run: RunOutput, tools_for_request: Callable[[List[Message]], List[Fun
         total += tokens
         names = ", ".join(t.name for t in tools) if len(tools) <= 6 else "the whole catalog"
         made = ", ".join(f"{c['function']['name']}({c['function']['arguments']})" for c in messages[index].tool_calls or [])
-        print(f"  request {number}: {len(tools):>2} tool{'s' if len(tools) > 1 else ' '}, ~{tokens:>5,} schema tokens [{names}]")
+        line = f"  request {number}: {len(tools):>2} tool{'s' if len(tools) > 1 else ' '}, ~{tokens:>5,} schema tokens [{names}]"
+        metrics = messages[index].metrics
+        if live and metrics is not None:
+            line += f"; provider: {metrics.input_tokens:,} input tokens ({metrics.cache_read_tokens:,} cached, {metrics.cache_write_tokens:,} written)"
+        print(line)
         print(f"             -> {made or 'final answer'}")
     print(f"  answer: {run.content}")
     return len(requests), total
@@ -175,11 +211,23 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", default="offline", help='"offline" (default), "openai:<model id>" or "anthropic:<model id>"')
     parser.add_argument("--question", default=QUESTION, help="needs a live --model: the offline model is scripted for the default question")
+    parser.add_argument(
+        "--padding-tokens",
+        type=int,
+        default=0,
+        metavar="N",
+        help="add about N tokens of filler to each agent's system prompt, standing in for a production agent's "
+        "long instructions: OpenAI only caches prompts of 1,024 tokens or more",
+    )
     args = parser.parse_args()
     if args.model == "offline" and args.question != QUESTION:
         parser.error("--question needs a live --model: the offline model is scripted for the default question")
     # Quiets warnings such as Agno's "tiktoken not installed" (token counts then use chars / 4); errors still show.
     logging.disable(logging.WARNING)
+    live = args.model != "offline"
+
+    def run(model: Model, tools: list) -> RunOutput:
+        return Agent(model=model, tools=tools, additional_context=padding(args.padding_tokens), telemetry=False).run(args.question)
 
     lazy = build_catalog()
     catalog = list(lazy.entries.values())
@@ -188,14 +236,24 @@ def main() -> None:
 
     print("Lazy agent (only search_tools attached):")
     search_tools = Function.from_callable(lazy.search_tools)
-    lazy_run = Agent(model=lazy.wrap(make_model(args.model)), tools=[lazy], telemetry=False).run(args.question)
-    lazy_requests, lazy_schemas = report(lazy_run, lambda before: [search_tools] + [e.template for e in lazy.loaded(before)])
+
+    def loaded(before: List[Message]) -> List[Function]:
+        return [search_tools] + [e.template for e in lazy.loaded(before)]
+
+    runs = {"lazy": run(lazy.wrap(make_model(args.model)), [lazy])}
+    lazy_requests, lazy_schemas = report(runs["lazy"], loaded, live)
     print(f"  examples.fx imported: {'examples.fx' in sys.modules}\n")
+
+    if args.model.partition(":")[0] == "openai":
+        print("Lazy agent, native OpenAI tool search (`tools` stays [search_tools]; the loaded tools go in the input):")
+        runs["native"] = run(lazy.wrap(make_model(args.model), native=True), [lazy])
+        report(runs["native"], loaded, live)
+        print()
 
     all_tools = [entry.template for entry in catalog]
     print(f"Eager agent (all {len(all_tools)} tools attached):")
-    eager_run = Agent(model=make_model(args.model), tools=all_tools, telemetry=False).run(args.question)
-    eager_requests, eager_schemas = report(eager_run, lambda before: all_tools)
+    runs["eager"] = run(make_model(args.model), all_tools)
+    eager_requests, eager_schemas = report(runs["eager"], lambda before: all_tools, live)
 
     # The lazy agent's instructions (which list the loadable tool names) ride along on every request.
     instructions = count_text_tokens(lazy.instructions or "") * lazy_requests
@@ -205,11 +263,12 @@ def main() -> None:
         f"(~{lazy_schemas:,} schemas + ~{instructions:,} instructions) vs eager ~{eager_schemas:,} over {eager_requests} "
         f"-> {1 - lazy_total / eager_schemas:.0%} less."
     )
-    if args.model != "offline":
-        print(
-            f"Provider-reported input tokens for the whole run: lazy {lazy_run.metrics.input_tokens:,} "
-            f"vs eager {eager_run.metrics.input_tokens:,}."
-        )
+    if live:
+        print("Provider-reported input tokens for the whole run (cost in uncached-token units, at GPT-5.6+ cache rates):")
+        for name, r in runs.items():
+            m = r.metrics
+            if m is not None:
+                print(f"  {name:>6}: {m.input_tokens:,} ({m.cache_read_tokens:,} cached, {m.cache_write_tokens:,} written) -> cost ~{input_cost(m):,.0f}")
 
 
 if __name__ == "__main__":

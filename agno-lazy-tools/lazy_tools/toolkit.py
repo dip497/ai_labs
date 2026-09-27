@@ -6,7 +6,7 @@ import importlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple, Union
 
 from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
@@ -81,7 +81,10 @@ class LazyTools(Toolkit):
     in the model, so the agent's model must be wrapped:
 
         lazy = LazyTools(tools=[...])
-        agent = Agent(model=lazy.wrap(OpenAIChat(id="gpt-6-luna")), tools=[lazy])
+        agent = Agent(model=lazy.wrap(OpenAIResponses(id="gpt-6-luna")), tools=[lazy])
+
+    With an `OpenAIResponses` model, `lazy.wrap(model, native=True)` uses OpenAI's
+    native tool search instead, so loading a tool doesn't invalidate the prompt cache.
     """
 
     def __init__(
@@ -109,9 +112,11 @@ class LazyTools(Toolkit):
         # `search` is overridden with something non-deterministic (like embeddings).
         self._memo: Dict[str, Tuple[str, ...]] = {}
 
+        # "Your tool search tool" also covers native mode, where `search_tools` reaches the
+        # model as OpenAI's `tool_search` tool rather than as a function.
         instructions = (
             f"You can load more tools on demand: {len(self._entries)} tools are available but not loaded yet. "
-            f"To use one, first call `{SEARCH_TOOL_NAME}` with keywords for the capability you need "
+            f"To use one, first call `{SEARCH_TOOL_NAME}` (your tool search tool) with keywords for the capability you need "
             f'(or "select:<tool_name>" for an exact tool). The tools it returns become callable on your next step. '
             "Search before telling the user you cannot do something."
         )
@@ -163,28 +168,28 @@ class LazyTools(Toolkit):
         run stay loaded for as long as that run is part of the agent's history.
         """
         loaded: Dict[str, LazyTool] = {}
-        for message in messages:
-            for tool_call in message.tool_calls or []:
-                function = tool_call.get("function") or {}
-                if function.get("name") != SEARCH_TOOL_NAME:
-                    continue
-                arguments: Any = function.get("arguments") or {}
-                if isinstance(arguments, str):
-                    try:
-                        arguments = json.loads(arguments)
-                    except json.JSONDecodeError:
-                        continue
-                query = arguments.get("query") if isinstance(arguments, dict) else None
-                if isinstance(query, str):
-                    for entry in self._search_memoized(query):
-                        loaded.setdefault(entry.name, entry)  # type: ignore[arg-type]
+        for _, entries in self.searches(messages):
+            for entry in entries:
+                loaded.setdefault(entry.name, entry)  # type: ignore[arg-type]
         return list(loaded.values())
 
-    def wrap(self, model: "Model") -> "Model":
-        """A copy of `model` that makes tools loaded by `search_tools` callable within the same run."""
+    def searches(self, messages: Iterable["Message"]) -> Iterator[Tuple[Dict[str, Any], List[LazyTool]]]:
+        """Each `search_tools` call in `messages` (an assistant tool call), with the entries it found."""
+        for message in messages:
+            for tool_call in message.tool_calls or []:
+                if (tool_call.get("function") or {}).get("name") == SEARCH_TOOL_NAME:
+                    query = tool_call_arguments(tool_call).get("query")
+                    yield tool_call, self._search_memoized(query) if isinstance(query, str) else []
+
+    def wrap(self, model: "Model", native: bool = False) -> "Model":
+        """A copy of `model` that makes tools loaded by `search_tools` callable within the same run.
+
+        With `native=True`, tools are loaded through the provider's own tool search, which
+        keeps the prompt cache intact (OpenAI Responses API only; see `lazy_tools/native.py`).
+        """
         from lazy_tools.model import with_lazy_tools
 
-        return with_lazy_tools(model, self)
+        return with_lazy_tools(model, self, native=native)
 
     def __deepcopy__(self, memo: Dict[int, Any]) -> "LazyTools":
         # Agno deep-copies agents (and their models) for isolation; the catalog is
@@ -198,6 +203,17 @@ class LazyTools(Toolkit):
                 self._memo.pop(next(iter(self._memo)))  # oldest first; the default search recomputes identically
             names = self._memo[query] = tuple(e.name for e in self.search(query))  # type: ignore[misc]
         return [self._entries[n] for n in names]
+
+
+def tool_call_arguments(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    """The arguments of an assistant tool call as a dict ({} if they don't parse)."""
+    arguments: Any = (tool_call.get("function") or {}).get("arguments") or {}
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except json.JSONDecodeError:
+            return {}
+    return arguments if isinstance(arguments, dict) else {}
 
 
 def _to_entries(source: ToolSource) -> List[LazyTool]:

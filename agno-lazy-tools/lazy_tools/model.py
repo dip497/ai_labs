@@ -17,8 +17,8 @@ addition lasts for the rest of the run. Resuming a paused run (human-in-the-loop
 dispatches through a table rebuilt from the agent's initial tools, via
 `get_function_call_to_run_from_tool_execution`, which is hooked too.
 
-These are Agno internals (verified against agno==3.0.11), and this module is the only
-code that depends on them.
+These are Agno internals (verified against agno==3.0.11). This module is the only code
+that depends on them, apart from the OpenAI adapter overrides in `lazy_tools/native.py`.
 """
 
 from __future__ import annotations
@@ -128,17 +128,26 @@ def _per_run_function(entry: "LazyTool", functions: Dict[str, Function]) -> Func
     return function
 
 
-_LAZY_CLASSES: Dict[type, type] = {}
+_LAZY_CLASSES: Dict[Tuple[type, type], type] = {}
 
 
-def with_lazy_tools(model: Model, lazy_tools: "LazyTools") -> Model:
-    """A shallow copy of `model` whose class also runs the lazy-tool hooks."""
+def with_lazy_tools(model: Model, lazy_tools: "LazyTools", native: bool = False) -> Model:
+    """A shallow copy of `model` whose class also runs the lazy-tool hooks.
+
+    With `native=True`, the hooks load tools through the provider's own tool search
+    (see `lazy_tools/native.py`); this raises for models that don't have one.
+    """
+    mixin: type = LazyToolsModelMixin
+    if native:
+        from lazy_tools.native import native_mixin_for
+
+        mixin = native_mixin_for(model)
     cls = type(model)
-    if not issubclass(cls, LazyToolsModelMixin):
-        if cls not in _LAZY_CLASSES:
+    if not issubclass(cls, mixin):
+        if (cls, mixin) not in _LAZY_CLASSES:
             # Same class name, so logs and provider names are unchanged.
-            _LAZY_CLASSES[cls] = type(cls.__name__, (LazyToolsModelMixin, cls), {"__module__": __name__})
-        cls = _LAZY_CLASSES[cls]
+            _LAZY_CLASSES[cls, mixin] = type(cls.__name__, (mixin, cls), {"__module__": __name__})
+        cls = _LAZY_CLASSES[cls, mixin]
     wrapped = copy.copy(model)
     wrapped.__class__ = cls
     wrapped.lazy_tools = lazy_tools  # type: ignore[attr-defined]
