@@ -61,7 +61,7 @@ lazy = LazyTools(tools=[
     LazyTool("my_pkg.crm:create_ticket",        # imported only when first loaded
              name="create_ticket", description="Open a support ticket in the CRM"),
 ])
-agent = Agent(model=lazy.wrap(OpenAIChat(id="gpt-5-mini")), tools=[lazy])  # plus any always-on tools
+agent = Agent(model=lazy.wrap(OpenAIChat(id="gpt-6-luna")), tools=[lazy])  # plus any always-on tools
 ```
 
 ## Run it
@@ -73,7 +73,7 @@ uv run pytest                          # 21 tests, all offline
 uv run python examples/demo.py         # offline, with a scripted model
 
 # Against a real model (needs OPENAI_API_KEY / ANTHROPIC_API_KEY):
-uv run --extra openai python examples/demo.py --model openai:gpt-5-mini
+uv run --extra openai python examples/demo.py --model openai:gpt-6-luna
 uv run --extra anthropic python examples/demo.py --model anthropic:claude-opus-5 --question "..."
 ```
 
@@ -164,8 +164,10 @@ tool list stays `[search_tools]`).
   `lazy_tools/model.py`; Agno is pinned, the tests catch breakage, and the hooks log a
   warning if the arguments they rely on move.
 - **Prompt caching.** Tools come first in the prompt prefix, so each load invalidates the
-  provider's prompt cache from that point on. Anthropic's server-side tool search avoids
-  this by appending tool references instead of changing `tools`.
+  provider's prompt cache from that point on. Provider-native tool search avoids this by
+  appending discovered tools at the end of the context instead of changing `tools`. Both
+  OpenAI (Responses API, gpt-5.4 and later, e.g. `gpt-6-luna`) and Anthropic offer it;
+  see [Alternatives](#alternatives-considered).
 - **Latency.** Each search costs a model round trip. The model can run several searches in
   parallel, as the demo does.
 - **Not carried over from toolkits:** toolkit `instructions` (the system prompt is already
@@ -177,9 +179,10 @@ tool list stays `[search_tools]`).
 - **Search is basic keyword matching.** Override `LazyTools.search()` to use BM25 or
   embeddings; results are memoized per query, so they stay consistent within a
   conversation.
-- **Not tested:** Teams, and a live LLM. This POC was built where the model APIs were
-  unreachable, so the evidence is the scripted model plus the real provider adapters
-  against a mock API. Run the demo with `--model` to try a real one.
+- **Not tested:** Teams, and a live LLM. The sandbox this was built in blocks
+  `api.openai.com` at its network egress proxy, so the evidence is the scripted model plus
+  the real provider adapters against a mock API. Run the demo with `--model` to try a
+  real one.
 
 ## Alternatives considered
 
@@ -188,11 +191,15 @@ tool list stays `[search_tools]`).
 | **This POC:** model hooks | yes | no | yes | Provider schema validation, per-tool hooks, confirmation and events all apply. |
 | Proxy tool: `search_tools` + `call_tool(name, arguments)` | yes | yes | no | Most portable. But arguments go through an untyped dict, and Agno only sees `call_tool`, so per-tool confirmation and hooks don't apply. |
 | Callable tools factory (`tools=fn`, `cache_callables=False`) reading loaded names from `session_state` | no, next run | yes | yes | Needs a second run (e.g. an automatic "continue") before the tool is usable. |
-| Anthropic server-side tool search (`tool_search_tool_bm25_20251119` + `defer_loading`) | yes | n/a | yes | Cache-friendly, but Anthropic-only. Agno's Claude adapter rebuilds function tools as `name`/`description`/`input_schema`, dropping `defer_loading`, so it needs adapter changes (untested beyond that). |
+| Provider-native tool search: OpenAI Responses API (`{"type": "tool_search"}` + `defer_loading: true`, gpt-5.4 and later, e.g. `gpt-6-luna`) or Anthropic (`tool_search_tool_bm25_20251119` + `defer_loading`) | yes | n/a | yes | **No prompt-cache miss**, since discovered tools are appended rather than changing `tools`. But Agno 3.0.11 can't express it yet: both its `OpenAIResponses` and `Claude` adapters serialize function tools without `defer_loading`. OpenAI responses also carry `tool_search_call` / `tool_search_output` items that Agno would need to round-trip. Untested here. |
 | Upstream change in Agno | yes | yes | yes | The proper fix, e.g. `response()` re-reading a mutable tool registry each turn. PR #7528 tried this and wasn't merged. |
 
 ## Next steps (if this goes further)
 
+- Use provider-native tool search where the model supports it (e.g. `gpt-6-luna` via
+  `OpenAIResponses`), keeping this client-side injection as the fallback for other
+  providers. That needs a small adapter subclass that emits `defer_loading` for deferred
+  tools, validated against the live API.
 - Propose a small upstream hook in Agno (a per-turn tool provider), which would remove the
   reliance on internals.
 - Lazily connect MCP / database toolkits when first loaded, and add tool unloading or a

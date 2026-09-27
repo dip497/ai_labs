@@ -81,7 +81,7 @@ class LazyTools(Toolkit):
     in the model, so the agent's model must be wrapped:
 
         lazy = LazyTools(tools=[...])
-        agent = Agent(model=lazy.wrap(OpenAIChat(id="gpt-5-mini")), tools=[lazy])
+        agent = Agent(model=lazy.wrap(OpenAIChat(id="gpt-6-luna")), tools=[lazy])
     """
 
     def __init__(

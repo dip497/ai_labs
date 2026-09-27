@@ -6,7 +6,7 @@ run. The same question then goes to an agent with every tool attached, and the t
 schemas the two sent to the model are compared.
 
     uv run python examples/demo.py                                        # offline scripted model
-    uv run --extra openai python examples/demo.py --model openai:gpt-5-mini
+    uv run --extra openai python examples/demo.py --model openai:gpt-6-luna
     uv run --extra anthropic python examples/demo.py --model anthropic:claude-opus-5
 """
 
@@ -142,7 +142,7 @@ def make_model(spec: str) -> Model:
     if provider == "openai":
         from agno.models.openai import OpenAIChat
 
-        return OpenAIChat(id=model_id or "gpt-5-mini")
+        return OpenAIChat(id=model_id or "gpt-6-luna")
     if provider == "anthropic":
         from agno.models.anthropic import Claude
 
