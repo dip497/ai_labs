@@ -69,7 +69,7 @@ agent = Agent(model=lazy.wrap(OpenAIChat(id="gpt-6-luna")), tools=[lazy])  # plu
 ```bash
 cd agno-lazy-tools
 uv sync
-uv run pytest                          # 21 tests, all offline
+uv run pytest                          # 22 tests, all offline
 uv run python examples/demo.py         # offline, with a scripted model
 
 # Against a real model (needs OPENAI_API_KEY / ANTHROPIC_API_KEY):
@@ -151,8 +151,9 @@ with schema size.
 - **Misc:** calling a tool that was never loaded fails; toolkits and `@tool` functions can
   be deferred; plus search ranking, `select:`, and the result cap.
 
-Negative control: with an unwrapped model, the same scenario never loads the tool (the
-tool list stays `[search_tools]`).
+**Negative control:** with an unwrapped model, the same scenario never loads the tool
+(the tool list stays `[search_tools]`). This is a test too, so a future Agno release that
+re-reads tools per turn would show up as a failure.
 
 ## Trade-offs and limitations
 

@@ -109,6 +109,20 @@ def test_searched_tool_is_loaded_and_called_in_the_same_run(mode):
     ]
 
 
+def test_without_the_model_hooks_the_tool_list_never_changes():
+    # Negative control: stock Agno fixes a run's tools before its tool-call loop, so the
+    # search "loads" the tool but the model never sees it. If this ever fails, Agno has
+    # started re-reading tools per turn and the hooks in lazy_tools/model.py may be moot.
+    lazy = LazyTools(tools=[get_current_weather])
+    model = ScriptedModel(policy=use_tool("get_current_weather", "weather", city="Paris"))
+    agent = Agent(model=model, tools=[lazy], telemetry=False)  # not lazy.wrap(model)
+
+    result = agent.run("What's the weather in Paris?")
+
+    assert result.content == "Tool not found"
+    assert model.tool_names_per_request() == [["search_tools"], ["search_tools"]]
+
+
 def test_injected_schema_is_the_tools_full_schema():
     lazy = LazyTools(tools=[get_current_weather, convert_currency])
     agent = make_agent(lazy, use_tool("get_current_weather", "weather", city="Paris"))
