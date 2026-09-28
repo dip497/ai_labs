@@ -1,0 +1,53 @@
+# Runs agno-lazy-tools/tool_search.py against the live OpenAI API, with the key stored in
+# this repository's `openaienv` environment.
+name: tool-search
+
+on:
+  push:
+    branches: [claude/continue-6nsk22]
+    paths: [agno-lazy-tools/**, .github/workflows/tool-search.yml]
+  workflow_dispatch:
+
+jobs:
+  live-run:
+    runs-on: ubuntu-latest
+    environment: openaienv
+    env:
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+    defaults:
+      run:
+        working-directory: agno-lazy-tools
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.11"
+
+      - name: Check the API key
+        run: |
+          test -n "$OPENAI_API_KEY" || { echo "The openaienv environment has no OPENAI_API_KEY secret"; exit 1; }
+          status=$(curl -s -o /dev/null -w '%{http_code}' https://api.openai.com/v1/models -H "Authorization: Bearer $OPENAI_API_KEY")
+          echo "GET /v1/models: HTTP $status"
+          test "$status" = 200
+
+      - name: Run the example
+        run: uv run python tool_search.py
+
+      - name: Compare input tokens with every tool schema sent up front
+        run: |
+          uv run python - <<'EOF'
+          from agno.agent import Agent
+          from agno.models.openai import OpenAIResponses
+          from tool_search import QUESTION, ToolSearchResponses, agent, tools
+
+          class Chained(OpenAIResponses):  # the same request chaining, without tool search
+              _using_reasoning_model = ToolSearchResponses._using_reasoning_model
+
+          eager = Agent(model=Chained(id="gpt-6-luna"), tools=tools, telemetry=False)
+          for name, a in [("tool search", agent), ("every tool up front", eager)]:
+              run = a.run(QUESTION)
+              per_request = [m.metrics.input_tokens for m in run.messages if m.role == "assistant" and m.metrics]
+              print(f"{name}: ran {[t.tool_name for t in run.tools or []]}; input tokens per request {per_request}, "
+                    f"total {run.metrics.input_tokens} ({run.metrics.cache_read_tokens} cached)")
+              print(f"  answer: {run.content}")
+          EOF

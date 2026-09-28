@@ -1,18 +1,18 @@
 # ai_labs
 
 Small experiments and POCs. Each lab is a self-contained uv project in its own directory.
+Keep labs as small as Agno's cookbook examples: one short, runnable script per idea.
 
 ## agno-lazy-tools
 
-POC: lazy (on-demand) tool loading for Agno agents. **Read `agno-lazy-tools/NOTES.md`
-first**: it has the current status, findings, and the next steps. The native OpenAI
-tool-search mode is built and mock-tested; next is a live run with `gpt-6-luna`, which is
-waiting on a working `OPENAI_API_KEY`. `agno-lazy-tools/README.md` is the write-up.
+Lazy tool loading for Agno agents with OpenAI's hosted tool search:
+`agno-lazy-tools/tool_search.py`, explained in `agno-lazy-tools/README.md`.
 
-- Set up and test: `cd agno-lazy-tools && uv sync && uv run pytest`
-- Demo: `uv run python examples/demo.py` (offline), or add
-  `--model openai:gpt-6-luna --padding-tokens 2000` for a live run (needs
-  `uv run --extra openai`)
-- `agno==3.0.11` is pinned, because `lazy_tools/model.py` and `lazy_tools/native.py`
-  override Agno internals. Re-run the tests before bumping it.
+- Run: `cd agno-lazy-tools && uv run python tool_search.py` (needs `OPENAI_API_KEY`).
+- The session sandbox's `OPENAI_API_KEY` is rejected by OpenAI (HTTP 401). The working key
+  is the `OPENAI_API_KEY` secret of the GitHub environment `openaienv`, which the
+  `.github/workflows/tool-search.yml` workflow uses. It runs on pushes to
+  `claude/continue-6nsk22`.
+- `agno==3.0.11` is pinned, because `tool_search.py` overrides two internal methods of
+  `OpenAIResponses`.
 - Pass `telemetry=False` to every `Agent`.
